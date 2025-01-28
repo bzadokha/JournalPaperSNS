@@ -443,9 +443,10 @@ def synTuningLayer2(netModel, nsiNeuron, numNeurons, nsi1,
 
     netModel.add_output('OutputEndZ')
 
-    kSynX = sp.linalg.solve(nsi1, np.ones_like(deltaX))
-    kSynY = sp.linalg.solve(nsi1, np.ones_like(deltaY))
-
+    kSynX = sp.linalg.solve(nsi1, deltaX)
+    kSynY = sp.linalg.solve(nsi1, deltaY)
+    kSynX, _, _ = Normalize(kSynX, 0, 1)
+    kSynY, _, _ = Normalize(kSynY, 0, 1)
     if np.any(kSynX > dEex / mag) or np.any(kSynY > dEex / mag):
         to_simulate = False
         print('SKIPPING THIS ONE')
@@ -495,6 +496,136 @@ def synTuningLayer2(netModel, nsiNeuron, numNeurons, nsi1,
             netModel.add_connection(synOutput, source=nameStrY, destination='Y' + str(j))
         else:
             1 + 1
+    return to_simulate, gX, gY
+
+def synTuningLayer2_V2(netModel, nsiNeuron, numNeurons, nsi1, nsi2,
+                        gI, synI, dEex, dEin,
+                        bellShift, jointTheta, bellWidth, deltaX, deltaY):
+    '''
+    :param netModel: model object
+    :param nsiNeuron: non-spiking neuron object from the SNS-toolbox
+    :param numNeurons: number of sensory neurons
+    :param nsi1: matrix that represents neuronal activity for Px (empty)
+    :param nsi2: matrix that represents neuronal activity for Py (empty)
+    :param gI: synaptic conductance = Gmax|k=1
+    :param synI: synaptic connection
+    :param dEex: excitatory synapse potential
+    :param dEin: inhibitory synapse potential
+    :param bellShift: shift of the input neurons
+    :param jointTheta: range of the shift for sensory(input) neurons
+    :param bellWidth: width of the bell curve function
+    :param deltaX: inputs for Px tuning
+    :param deltaY: inputs for Py tuning
+    :return: synaptic conductance surfaces and to_simulate values
+    '''
+
+    k1 = 0
+
+    for i in range(numNeurons):
+        for j in range(numNeurons):
+            '''
+                generate response of each NSI neuron given a particular 
+            '''
+            th1 = bell_curve(mag, theta=jointTheta[i], shift=bellShift, width=bellWidth)
+            P1 = bell_curve(mag, theta=jointTheta[j], shift=bellShift, width=bellWidth)
+            P2 = bell_curve(mag, theta=jointTheta[j], shift=bellShift, width=bellWidth)
+            '''
+                This calculate requires refinement. Use the steady-state equations properly.
+            '''
+            # neural activity positions
+            nsi1[k1, :] = ComboVec(theta2Bell=th1, theta3Bell=P1, mag=mag, comboAct=nsi1, gMax=gI, delE=dEex)
+            nsi2[k1, :] = ComboVec(theta2Bell=th1, theta3Bell=P2, mag=mag, comboAct=nsi2, gMax=gI, delE=dEex)
+            nameStrP1 = 'NSI_P1' + str(i) + str(j)  # between theta1 and P1&P2
+            nameStrP2 = 'NSI_P2' + str(i) + str(j)
+            # from input sensory neurons to NSIs 1st layer
+            netModel.add_neuron(neuron_type=nsiNeuron, name=nameStrP1)
+            netModel.add_neuron(neuron_type=nsiNeuron, name=nameStrP2)
+
+            netModel.add_connection(synI, source='Bell1' + str(i), destination=nameStrP1)
+            netModel.add_connection(synI, source='P1bell' + str(j), destination=nameStrP1)
+
+            netModel.add_connection(synI, source='Bell1' + str(i), destination=nameStrP2)
+            netModel.add_connection(synI, source='P2bell' + str(j), destination=nameStrP2)
+            # Increment k, which is a linear counting variable through all the for loops.
+            k1 += 1
+
+    for n in range(numNeurons):
+        netModel.add_connection(synI, source='OutputP1', destination='P1bell' + str(n))
+        netModel.add_connection(synI, source='OutputP2', destination='P2bell' + str(n))
+
+    for index in range(numNeurons):
+        nameStrX = 'X' + str(index)
+        netModel.add_output(nameStrX)
+
+    for index in range(numNeurons):
+        nameStrY = 'Y' + str(index)
+        netModel.add_output(nameStrY)
+
+    # modify this
+    kSynX = sp.linalg.solve(nsi1, deltaX)
+    kSynY = sp.linalg.solve(nsi1, deltaY)
+
+    kSynX, _, _ = Normalize(kSynX, 0, 1)
+    kSynY, _, _ = Normalize(kSynY, 0, 1)
+    if np.any(kSynX > dEex / mag) or np.any(kSynY > dEex / mag) or np.any(kSynZ > dEex / mag):
+        to_simulate = False
+        print('SKIPPING THIS ONE')
+    else:
+        to_simulate = True
+
+    gX = np.zeros([numNeurons, numNeurons])
+    gY = np.zeros([numNeurons, numNeurons])
+
+    dEX = np.zeros([numNeurons, numNeurons])
+    dEY = np.zeros([numNeurons, numNeurons])
+    '''
+    2nd layer output connections
+    '''
+    n = 0
+    for j in range(numNeurons):
+        for k in range(numNeurons):
+            nameStrX = 'NSI_P1' + str(j) + str(k)
+            nameStrY = 'NSI_P2' + str(j) + str(k)
+            '''
+                    SNS-Toolbox does not enable synapses with max_cond = 0, so if kSyn = 0, we must pass it machine epsilon instead.
+                '''
+            if kSynX[n] > 0:
+                dEX[j, k] = dEex
+            elif kSynX[n] < 0:
+                dEX[j, k] = dEin
+            else:
+                continue
+
+            if kSynY[n] > 0:
+                dEY[j, k] = dEex
+            elif kSynY[n] < 0:
+                dEY[j, k] = dEin
+            else:
+                continue
+
+            '''
+            Synapses from the combo neurons to the output neuron(s) each have unique conductance value that corresponds to
+            the desired output in that scenario. Note that the e_lo for the synapses = mag and e_hi = 2*mag, because
+            multiple combo neurons will be active at any time, but we only care about the most active, so setting e_lo this 
+            way serves as a threshold mechanism.
+            '''
+            gX[j, k] = Gmax(kSynX[n], mag, dEX[j, k])
+            gY[j, k] = Gmax(kSynY[n], mag, dEY[j, k])
+
+            if gX[j, k] > 0:
+                synOutput = NonSpikingSynapse(max_conductance=float(gX[j, k]), reversal_potential=float(dEX[j, k]),
+                                              e_lo=mag, e_hi=2 * mag)
+                netModel.add_connection(synOutput, source=nameStrX, destination='X' + str(j))
+            else:
+                1 + 1
+            if gY[j, k] > 0:
+                synOutput = NonSpikingSynapse(max_conductance=float(gY[j, k]), reversal_potential=float(dEY[j, k]),
+                                              e_lo=mag, e_hi=2 * mag)
+                netModel.add_connection(synOutput, source=nameStrY, destination='Y' + str(j))
+            else:
+                1 + 1
+            n += 1
+
     return to_simulate, gX, gY
 
 def FKJSNS3D(delay, numJoints, numSensPerJoint, numSteps,
@@ -634,64 +765,79 @@ def FKJSNS3D(delay, numJoints, numSensPerJoint, numSteps,
         to tune a 1st layer(theta2 & theta3) of the network we need only 2 surfaces
     '''
     mapSetX = np.array([mapNormX[0, :], mapNormX[numSensPerJoint - 1, :]])
-    mapSetY = np.array([mapNormY[0, :], mapNormX[numSensPerJoint - 1, :]])
-
-    XcA = maxCoef[0, :] - minCoef[0, :]
-    YcA = maxCoef[1, :] - minCoef[1, :]
-
-    Pxx = np.zeros([numSensPerJoint, 3])
-
-    for i in range(numSensPerJoint):
-        theta = np.array([jointTheta[i], 0, 0])
-        endPointTrnslMat = FrwrdKnmtcsFunc(wR1, theta, pR1)
-        Pxx[i, :] = endPointTrnslMat[0:3, 3]
-
-    maxNorm = 1
-    minNorm = 0
-    # XcANorm = (maxNorm-minNorm)*((XcA - min(XcA)) / (max(XcA) - min(XcA)))+minNorm
-    # YcANorm = (maxNorm-minNorm)*((YcA - min(YcA)) / (max(YcA) - min(YcA)))+minNorm
-
-    XcANorm = (maxNorm - minNorm) * ((Pxx[:, 0] - min(Pxx[:, 0])) / (max(Pxx[:, 0]) - min(Pxx[:, 0]))) + minNorm
-    YcANorm = (maxNorm - minNorm) * ((Pxx[:, 1] - min(Pxx[:, 1])) / (max(Pxx[:, 1]) - min(Pxx[:, 1]))) + minNorm
-    print('XcANorm', XcANorm)
-    print('YcANorm', YcANorm)
     '''
         "nsi..." matrices store neural activity values for each NSI 
     '''
     nsi23X = np.empty(shape=[pow(numSensPerJoint, numJoints - 1), pow(numSensPerJoint, numJoints - 1)])  # theta2 and theta3, Xcoord
     nsi23Y = np.empty_like(nsi23X)  # theta2 and theta3, Ycoord
-    nsiZ = np.empty_like(nsi23X)  # theta2 and theta3,
+    nsiZ = np.empty_like(nsi23X)  # theta2 and theta3, Zcoord
     # Zcoord does not depend on theta1
     nsiP1 = np.empty(shape=[numSensPerJoint, numSensPerJoint])  # theta1 and P1&P2 from the n-1 layer 23
 
     jointThetaMat = np.empty([numSensPerJoint, 1])
     jointThetaMat[:, 0] = jointTheta
     '''
-    Now we create the each combo neuron, its input connections, and its output connections. Here, we have 2 nested for
-    loops, one for each joint/independent variable. As stated above, a higher-dimensional network would require more for 
-    loops or an approach in which we NDgrid the joint angles/sensory neurons and then use a single for loop.
+        Now we create the each combo neuron, its input connections, and its output connections. Here, we have 2 nested for
+        loops, one for each joint/independent variable. As stated above, a higher-dimensional network would require more for 
+        loops or an approach in which we NDgrid the joint angles/sensory neurons and then use a single for loop.
     '''
     '''
         Setting up synaptic conductance values for NSIs between theta 2 and theta 3
 
     '''
-    # to_simulate, gX, gY, gZ, gX1, gY1 = synConnectMap(net, NSIneuron, numSensPerJoint,
-    #                                                   nsiX=nsi23X, nsiY=nsi23Y, nsiZ=nsiZ, nsi1=nsiP1,
-    #                                                   mapX=mapSetX, mapY=mapSetY, mapZ=mapNormZ,
-    #                                                   gI=gIdent, synI=identitySyn, dEex=delEex, dEin=delEin,
-    #                                                   bellShift=jointThetaMat, jointTheta=jointTheta,
-    #                                                   bellWidth=widthBell,
-    #                                                   deltaX=XcANorm, deltaY=YcANorm)
     to_simulate, gX, gY, gZ = synTuningLayer1(netModel=net, nsiNeuron=NSIneuron,numNeurons=numSensPerJoint,
                                              nsiX=nsi23X, nsiY=nsi23Y, nsiZ=nsiZ,
                                              mapX=mapSetX, mapZ=mapNormZ,
                                              gI=gIdent, synI=identitySyn, dEex=delEex, dEin=delEin,
                                              bellShift=jointThetaMat, jointTheta=jointTheta, bellWidth=widthBell)
+    """
+        Since I have no idea how to tune 2nd layer there are a few options:
+    """
+    '''
+        1st option: use max(mapX)-min(mapX) as a coefficient for solving a diff equation
+    '''
+    maxMinX = maxCoef[0, :] - minCoef[0, :]
+    maxMinY = maxCoef[1, :] - minCoef[1, :]
+    '''
+        2nd option: use endpoint positions where theta2 & theta3 == 0 and only theta1 is changing from -1.6 to 1.6 rads
+    '''
+    Pxy = np.zeros([numSensPerJoint, 3])
+
+    for i in range(numSensPerJoint):
+        theta = np.array([jointTheta[i], 0, 0])
+        endPointTrnslMat = FrwrdKnmtcsFunc(wR1, theta, pR1)
+        Pxy[i, :] = endPointTrnslMat[0:3, 3]
+
+    '''
+        Another option is to change normalization range. We used [0, 1] previously but we also can try [-1, 1], [-0.5, 1]
+    '''
+
+    maxNorm = 1
+    minNorm0 = 0
+    minNorm05 = -0.5
+    minNorm1 = -1
+
+    minNorm = [minNorm1, minNorm05, minNorm0]
+
+    maxMinXnorm = np.zeros([numSensPerJoint, len(minNorm)])
+    maxMinYnorm = np.zeros_like(maxMinXnorm)
+    pXnorm = np.zeros_like(maxMinXnorm)
+    pYnorm = np.zeros_like(maxMinXnorm)
+    for i in range(3):
+        maxMinXnorm[:, i], _, _ = Normalize(maxMinX, minNorm[i], maxNorm)
+        maxMinYnorm[:, i], _, _ = Normalize(maxMinY, minNorm[i], maxNorm)
+
+        pXnorm[:, i], _, _ = Normalize(Pxy[:, 0], minNorm[i], maxNorm)
+        pYnorm[:, i], _, _ = Normalize(Pxy[:, 1], minNorm[i], maxNorm)
+
     _, gX1, gY1 = synTuningLayer2(netModel=net, nsiNeuron=NSIneuron, numNeurons=numSensPerJoint,
                                             nsi1=nsiP1, gI=gIdent, synI=identitySyn, dEex=delEex, dEin=delEin,
                                             bellShift=jointThetaMat, jointTheta=jointTheta, bellWidth=widthBell,
-                                            deltaX=XcANorm, deltaY=YcANorm)
-
+                                            deltaX=maxMinXnorm[:, 2], deltaY=maxMinYnorm[:, 2])
+    '''
+        another architecture of the 2nd layer: use bell curve activation neurons and pass through them P0 and P1 signals
+        and have NxN NSI compartments instead of 2xN
+    '''
     # Concatenate the inputs into one network input array. Calculate the "Actual X, Y, Z values as a function of time",
     # ActualT.
     # Calculate and store the input current for the theta2 and theta3 sensory neurons using the bellCurve function.
@@ -787,8 +933,9 @@ T3 = 250  # 102.5 # 102.5
 
 theta1vec = trajectoryInput(t, T1, thetamin=thetaMin, thetamax=thetaMax)
 theta2vec = trajectoryInput(t, T2, thetamin=thetaMin, thetamax=thetaMax)
-# theta2vec = np.zeros_like(theta1vec)
 theta3vec = trajectoryInput(t, T3, thetamin=thetaMin, thetamax=thetaMax)
+
+# theta2vec = np.zeros_like(theta1vec)
 # theta3vec = np.zeros_like(theta1vec)
 
 mag = 1
